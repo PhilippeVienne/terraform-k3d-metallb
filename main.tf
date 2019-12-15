@@ -13,6 +13,10 @@ variable "k3d_cluster_ip" {
   type = string
 }
 
+provider "docker" {
+  version = ">2.6.0"
+}
+
 variable "workers_count" {
   default = 0
   type = number
@@ -32,6 +36,9 @@ resource "null_resource" "cluster" {
     ]
     command = <<TERM
 k3d create --name ${var.k3d_cluster_name} --workers ${var.workers_count} --auto-restart --api-port ${var.k3d_cluster_ip}:${var.k3d_cluster_port}
+until k3d get-kubeconfig --name='${var.k3d_cluster_name}'; do
+  sleep 1;
+done
 TERM
   }
   provisioner "local-exec" {
@@ -41,11 +48,14 @@ TERM
 }
 
 data external kubeconfig {
+  depends_on = [
+    null_resource.cluster
+  ]
   program = [
     "/bin/bash",
     "-c",
 <<BASH
-cat $(k3d get-kubeconfig --name='${var.k3d_cluster_name}') | jq -R --slurp "{kubeconfig:.}"
+k3d get-kubeconfig --name='${var.k3d_cluster_name}' | jq -R "{kubeconfig:.}"
 BASH
   ]
 }
@@ -57,35 +67,25 @@ data docker_network k3d {
   name = "k3d-${var.k3d_cluster_name}"
 }
 
-resource "local_file" "kubeconfig" {
-  filename = "${path.module}/kubeconfig.yaml"
-  sensitive_content = data.external.kubeconfig.result["kubeconfig"]
-}
-
 resource "null_resource" "metallb" {
   depends_on = [
     null_resource.cluster
   ]
-  triggers = {
-    kubeconfig = md5(local_file.kubeconfig.sensitive_content)
-  }
   provisioner "local-exec" {
     environment = {
-      KUBECONFIG = local_file.kubeconfig.filename
+      KUBECONFIG = data.external.kubeconfig.result["kubeconfig"]
     }
     command = "kubectl apply -f https://raw.githubusercontent.com/google/metallb/v0.8.3/manifests/metallb.yaml"
   }
   provisioner "local-exec" {
-    environment = {
-      KUBECONFIG = local_file.kubeconfig.filename
-    }
-    command = "kubectl delete -f https://raw.githubusercontent.com/google/metallb/v0.8.3/manifests/metallb.yaml"
+    command = "kubectl delete -f https://raw.githubusercontent.com/google/metallb/v0.8.3/manifests/metallb.yaml --kubeconfig=$(k3d get-kubeconfig --name='${var.k3d_cluster_name}')"
     when = destroy
   }
 }
 
 resource "local_file" "metallb_config" {
   depends_on = [
+    null_resource.cluster,
     data.docker_network.k3d
   ]
   filename = "${path.module}/metallb_config.yaml"
@@ -114,25 +114,22 @@ resource "null_resource" "metallb_config" {
     null_resource.metallb
   ]
   triggers = {
-    kubeconfig = md5(local_file.kubeconfig.sensitive_content)
+    kubeconfig = data.external.kubeconfig.result["kubeconfig"]
     metallb_config = md5(local_file.metallb_config.content)
   }
   provisioner "local-exec" {
     environment = {
-      KUBECONFIG = local_file.kubeconfig.filename
+      KUBECONFIG = data.external.kubeconfig.result["kubeconfig"]
     }
     command = "kubectl apply -f ${local_file.metallb_config.filename}"
   }
   provisioner "local-exec" {
-    environment = {
-      KUBECONFIG = local_file.kubeconfig.filename
-    }
-    command = "kubectl delete -n metallb-system configmap config"
+    command = "kubectl delete -n metallb-system configmap config --kubeconfig=$(k3d get-kubeconfig --name='${var.k3d_cluster_name}')"
     when = destroy
   }
 }
 
 output "kubeconfig" {
-  value = data.external.kubeconfig.result["kubeconfig"]
+  value = file(data.external.kubeconfig.result["kubeconfig"])
   sensitive = true
 }
