@@ -1,0 +1,6 @@
+kubeconfig.yaml
+metallb_config.yaml
+*.tfstate
+*.tfstate.backup
+.terraform
+terraform.tfvars
